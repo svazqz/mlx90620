@@ -1,212 +1,269 @@
+#define _POSIX_C_SOURCE 200809L
 #include <mlx90620.h>
-#ifdef __cplusplus
-extern "C" {
-#endif
-static byte refreshRate = Hz_LSB_32; // see thermomin.h
+#include <errno.h>
+#include <float.h>
+#include <math.h>
+#include <stddef.h>
+#include <string.h>
+#include <time.h>
 
-void initSensor(MLX90620 *s) {
-  readEEPROM(s);
-  writeTrimmingValue(s);
-  usleep(5000);
-  setConfiguration();
-  usleep(5000);
-  readRes(s);
-}
+enum { SENSOR_ADDRESS = 0x60, EEPROM_ADDRESS = 0x50 };
 
-void readEEPROM(MLX90620 *s)
+static uint16_t unsigned_word(const uint8_t data[2])
 {
-  int j;
-  i2c_start(*getBus());
-  i2c_send_byte(*getBus(), 0x50 << 1 | I2C_WRITE);
-  i2c_send_byte(*getBus(), 0x00);
-  i2c_start(*getBus());
-  i2c_send_byte(*getBus(), 0x50 << 1 | I2C_READ);
-  for (j = 0; j < 256; j ++)
-  {
-    s->eeprom[j] = i2c_read_byte(*getBus());
-    i2c_send_bit(*getBus(), I2C_ACK);
-  }
-  i2c_stop(*getBus());
+    return (uint16_t)(((uint16_t)data[1] << 8) | data[0]);
 }
 
-void writeTrimmingValue(MLX90620 *s)
+static int16_t signed_word(uint16_t value)
 {
-  i2c_start(*getBus());
-  i2c_send_byte(*getBus(), 0x60 << 1 | I2C_WRITE);
-  i2c_send_byte(*getBus(), 0x04);
-  i2c_send_byte(*getBus(), (byte)s->eeprom[OSC_TRIM_VALUE] - 0xAA);
-  i2c_send_byte(*getBus(), s->eeprom[OSC_TRIM_VALUE]);
-  i2c_send_byte(*getBus(), 0x56);
-  i2c_send_byte(*getBus(), 0x00);
-  i2c_stop(*getBus());
+    return (int16_t)(value < 0x8000 ? (int32_t)value : (int32_t)value - 65536);
 }
 
-void setConfiguration()
+static int signed_byte(uint8_t value)
 {
-  byte defaultConfig_H = 0b01000100;            //0x54=0b00000100;
-  i2c_start(*getBus());
-  i2c_send_byte(*getBus(), 0x60 << 1 | I2C_WRITE);
-  i2c_send_byte(*getBus(), 0x03);
-  i2c_send_byte(*getBus(), (byte)refreshRate - 0x55);
-  i2c_send_byte(*getBus(), refreshRate);
-  i2c_send_byte(*getBus(), defaultConfig_H - 0x55);
-  i2c_send_byte(*getBus(), defaultConfig_H);
-  i2c_stop(*getBus());
+    return value < 0x80 ? value : value - 256;
 }
 
-int16_t readConfig()
+static void settle(void)
 {
-  int16_t configuration = 0;
-  byte configLow = 0, configHigh = 0;
-  i2c_start(*getBus());
-  i2c_send_byte(*getBus(), 0x60 << 1 | I2C_WRITE);
-  i2c_send_byte(*getBus(), 0x02);
-  i2c_send_byte(*getBus(), 0x92);
-  i2c_send_byte(*getBus(), 0x00);
-  i2c_send_byte(*getBus(), 0x01);
-  i2c_start(*getBus());
-  i2c_send_byte(*getBus(), 0x60 << 1 | I2C_READ);
-  configLow=i2c_read_byte(*getBus());
-  i2c_send_bit(*getBus(), I2C_ACK);
-  configHigh=i2c_read_byte(*getBus());
-  i2c_send_bit(*getBus(), I2C_ACK);
-  i2c_stop(*getBus());
-  // printf("Configuration: 0x%02X 0x%02X\n", configLow, configHigh);
-  configuration = ((uint16_t) (configHigh << 8) | configLow);
-  return configuration;
+    struct timespec remaining = { 0, 5000000L };
+    while (nanosleep(&remaining, &remaining) == -1 && errno == EINTR) {
+    }
 }
 
-bool checkConfig()           //Poll the MLX90621 for its current status. Returns true if the POR/Brown out bit is set
+static bool transfer(uint8_t address, const uint8_t *command, size_t command_size,
+                     uint8_t *data, size_t size)
 {
-  bool check = !((readConfig() & 0x0400) >> 10);
-  return check;
+    i2c_t bus = *getBus();
+    i2c_start(bus);
+    bool ok = i2c_send_byte(bus, (address << 1) | I2C_WRITE) == I2C_ACK;
+    for (size_t index = 0; ok && index < command_size; ++index)
+        ok = i2c_send_byte(bus, command[index]) == I2C_ACK;
+
+    if (ok && size != 0) {
+        i2c_start(bus);
+        ok = i2c_send_byte(bus, (address << 1) | I2C_READ) == I2C_ACK;
+        for (size_t index = 0; ok && index < size; ++index) {
+            data[index] = i2c_read_byte(bus);
+            i2c_send_bit(bus, index + 1 == size ? I2C_NACK : I2C_ACK);
+            ok = i2c_status() == I2C_OK;
+        }
+    }
+    i2c_stop(bus);
+    return ok && i2c_status() == I2C_OK;
 }
 
-void readRes(MLX90620 *s) {
-  s->resolution = (readConfig() & 0x30) >> 4;      //Read the resolution from the config register
-}
-
-void readPTAT(MLX90620 *s)                     //Absolute ambient temperature data of the device can be read by using the following function.
+static bool read_eeprom(uint8_t eeprom[256])
 {
-  byte ptatLow = 0, ptatHigh = 0;
-  i2c_start(*getBus());
-  i2c_send_byte(*getBus(), 0x60 << 1 | I2C_WRITE);
-  i2c_send_byte(*getBus(), 0x02);
-  i2c_send_byte(*getBus(), 0x40);
-  i2c_send_byte(*getBus(), 0x00);
-  i2c_send_byte(*getBus(), 0x01);
-  i2c_start(*getBus());
-  i2c_send_byte(*getBus(), 0x60 << 1 | I2C_READ);
-  ptatLow=i2c_read_byte(*getBus());
-  i2c_send_bit(*getBus(), I2C_ACK);
-  ptatHigh=i2c_read_byte(*getBus());
-  i2c_send_bit(*getBus(), I2C_ACK);
-  i2c_stop(*getBus());
-  s->ptat = ((uint16_t) (ptatHigh << 8) | ptatLow);
+    const uint8_t start_address = 0;
+    return transfer(EEPROM_ADDRESS, &start_address, 1, eeprom, 256);
 }
 
-void calculateTA(MLX90620 *s)                                          //See Datasheet MLX90621
+static bool write_trim(uint8_t trim)
 {
-  float v_th = 0, k_t1 = 0, k_t2 = 0;
-
-  int16_t k_t1_scale = (int16_t) (s->eeprom[KT_SCALE] & 0xF0) >> 4;    //KT_SCALE=0xD2[7:4]
-  int16_t k_t2_scale = (int16_t) (s->eeprom[KT_SCALE] & 0x0F) + 10;    //KT_SCALE=0xD2[3:0]+10
-  v_th = (float) 256 * s->eeprom[VTH_H] + s->eeprom[VTH_L];
-  if (v_th >= 32768.0)   v_th -= 65536.0;
-  v_th = v_th / pow(2, (3 - s->resolution));
-  k_t1 = (float) 256 * s->eeprom[KT1_H] + s->eeprom[KT1_L];
-  if (k_t1 >= 32768.0)   k_t1 -= 65536.0;
-  k_t1 /= (pow(2, k_t1_scale) * pow(2, (3 - s->resolution)));
-  k_t2 = (float) 256 * s->eeprom[KT2_H] + s->eeprom[KT2_L];
-  if (k_t2 >= 32768.0)   k_t2 -= 65536.0;
-  k_t2 /= (pow(2, k_t2_scale) * pow(2, (3 - s->resolution)));      //0.000768
-  s->tambient = ((-k_t1 + sqrt((k_t1*k_t1) - (4 * k_t2 * (v_th - (float) s->ptat)))) / (2 * k_t2)) + 25.0;
+    const uint8_t command[] = { 0x04, (uint8_t)(trim - 0xaa), trim, 0x56, 0x00 };
+    return transfer(SENSOR_ADDRESS, command, sizeof(command), NULL, 0);
 }
 
-void readCPIX(MLX90620 *s)                     //Compensation pixel data of the device can be read by using the following function.
+static bool configure(void)
 {
-  byte cpixLow = 0, cpixHigh = 0;
-  i2c_start(*getBus());
-  i2c_send_byte(*getBus(), 0x60 << 1 | I2C_WRITE);
-  i2c_send_byte(*getBus(), 0x02);
-  i2c_send_byte(*getBus(), 0x41);
-  i2c_send_byte(*getBus(), 0x00);
-  i2c_send_byte(*getBus(), 0x01);
-  i2c_start(*getBus());
-  i2c_send_byte(*getBus(), 0x60 << 1 | I2C_READ);
-  cpixLow=i2c_read_byte(*getBus());
-  i2c_send_bit(*getBus(), I2C_ACK);
-  cpixHigh=i2c_read_byte(*getBus());
-  i2c_send_bit(*getBus(), I2C_ACK);
-  i2c_stop(*getBus());
-  s->cpix = ((int16_t) (cpixHigh << 8) | cpixLow);
-  if (s->cpix >= 32768)    s->cpix -= 65536;
+    const uint8_t config_high = 0x44;
+    const uint8_t command[] = {
+        0x03, (uint8_t)(Hz_LSB_32 - 0x55), Hz_LSB_32,
+        (uint8_t)(config_high - 0x55), config_high
+    };
+    return transfer(SENSOR_ADDRESS, command, sizeof(command), NULL, 0);
 }
 
-void readIR(MLX90620 *s)     //IR data of the device that it is read as a whole.
+static bool read_register(uint8_t address, uint16_t *value)
 {
-  int j;
-
-  i2c_start(*getBus());
-  i2c_send_byte(*getBus(), 0x60 << 1 | I2C_WRITE);
-  i2c_send_byte(*getBus(), 0x02);
-  i2c_send_byte(*getBus(), 0x00);
-  i2c_send_byte(*getBus(), 0x01);
-  i2c_send_byte(*getBus(), 0x40);
-  i2c_start(*getBus());
-  i2c_send_byte(*getBus(), 0x60 << 1 | I2C_READ);
-
-  for (j = 0; j < 64; j++)
-  {
-    byte pixelDataLow = i2c_read_byte(*getBus());
-    i2c_send_bit(*getBus(), I2C_ACK);
-    byte pixelDataHigh = i2c_read_byte(*getBus());
-    i2c_send_bit(*getBus(), I2C_ACK);
-    s->irData[j] = (int16_t) ((pixelDataHigh << 8) | pixelDataLow);  //Each pixel value takes up two bytes thus NUM_PIXELS * 2
-  }
-  i2c_stop(*getBus());
+    const uint8_t command[] = { 0x02, address, 0x00, 0x01 };
+    uint8_t bytes[2];
+    if (!transfer(SENSOR_ADDRESS, command, sizeof(command), bytes, sizeof(bytes)))
+        return false;
+    *value = unsigned_word(bytes);
+    return true;
 }
 
-void calculateTO(MLX90620 *s)                                              //See Datasheet MLX90621
+void initSensor(MLX90620 *sensor)
 {
-  float a_ij[64], b_ij[64], alpha_ij[64];
-  float emissivity, tgc, alpha_cp, a_cp, b_cp;
-  int16_t a_common, a_i_scale, b_i_scale;
-  int i;
+    if (sensor == NULL)
+        return;
 
-  emissivity = (256 * s->eeprom[CAL_EMIS_H] + s->eeprom[CAL_EMIS_L]) / 32768.0;
-  a_common = (int16_t) 256 * s->eeprom[CAL_ACOMMON_H] + s->eeprom[CAL_ACOMMON_L];
-  if (a_common >= 32768)    a_common -= 65536;
-  alpha_cp = (256 * s->eeprom[CAL_alphaCP_H] + s->eeprom[CAL_alphaCP_L]) / (pow(2, CAL_A0_SCALE) * pow(2, (3 - s->resolution)));
-  a_i_scale = (int16_t) (s->eeprom[CAL_AI_SCALE] & 0xF0) >> 4;
-  b_i_scale = (int16_t) s->eeprom[CAL_BI_SCALE] & 0x0F;
-  a_cp = (float) 256 * s->eeprom[CAL_ACP_H] + s->eeprom[CAL_ACP_L];
-  if (a_cp >= 32768.0)    a_cp -= 65536.0;
-  a_cp /= pow(2, (3 - s->resolution));
-  b_cp = (float) s->eeprom[CAL_BCP];
-  if (b_cp > 127.0)     b_cp -= 256.0;
-  b_cp /= (pow(2, b_i_scale) * pow(2, (3 - s->resolution)));
-  tgc = (float) s->eeprom[CAL_TGC];
-  if (tgc > 127.0)  tgc -= 256.0;
-  tgc /= 32.0;
-  float v_cp_off_comp = (float) s->cpix - (a_cp + b_cp * (s->tambient - 25.0));
-  float v_ir_off_comp, v_ir_tgc_comp, v_ir_norm, v_ir_comp;
-  for (i = 0; i < 64; i++)
-  {
-    a_ij[i] = ((float) a_common + s->eeprom[i] * pow(2, a_i_scale)) / pow(2, (3 - s->resolution));
-    b_ij[i] = s->eeprom[0x40 + i];
-    if (b_ij[i] > 127)        b_ij[i] -= 256;
-    b_ij[i] /= (pow(2, b_i_scale) * pow(2, (3 - s->resolution)));
-    v_ir_off_comp = s->irData[i] - (a_ij[i] + b_ij[i] * (s->tambient - 25.0));
-    v_ir_tgc_comp = v_ir_off_comp - tgc * v_cp_off_comp;
-    alpha_ij[i] = ((256 * s->eeprom[CAL_A0_H] + s->eeprom[CAL_A0_L]) / pow(2, s->eeprom[CAL_A0_SCALE]));
-    alpha_ij[i] += (s->eeprom[0x80 + i] / pow(2, s->eeprom[CAL_DELTA_A_SCALE]));
-    alpha_ij[i] /= pow(2, 3 - s->resolution);
-    v_ir_norm = v_ir_tgc_comp / (alpha_ij[i] - tgc * alpha_cp);
-    v_ir_comp = v_ir_norm / emissivity;
-    s->temperatures[i] = sqrt(sqrt((v_ir_comp + pow((s->tambient + 273.15), 4)))) - 273.15;
-  }
+    uint8_t eeprom[256];
+    uint16_t configuration;
+    sensor->check = MLX90620_ERROR;
+    if (!read_eeprom(eeprom) || !write_trim(eeprom[OSC_TRIM_VALUE]))
+        return;
+    settle();
+    if (!configure())
+        return;
+    settle();
+    if (!readConfigChecked(&configuration))
+        return;
+
+    memcpy(sensor->eeprom, eeprom, sizeof(eeprom));
+    sensor->resolution = (configuration & 0x30) >> 4;
+    sensor->check = MLX90620_OK;
 }
-#ifdef __cplusplus
+
+void readEEPROM(MLX90620 *sensor)
+{
+    if (sensor == NULL)
+        return;
+    uint8_t eeprom[256];
+    sensor->check = read_eeprom(eeprom) ? MLX90620_OK : MLX90620_ERROR;
+    if (sensor->check == MLX90620_OK)
+        memcpy(sensor->eeprom, eeprom, sizeof(eeprom));
 }
-#endif
+
+void writeTrimmingValue(MLX90620 *sensor)
+{
+    if (sensor != NULL)
+        sensor->check = write_trim(sensor->eeprom[OSC_TRIM_VALUE]) ? MLX90620_OK : MLX90620_ERROR;
+}
+
+void setConfiguration(void)
+{
+    (void)configure();
+}
+
+bool readConfigChecked(uint16_t *config)
+{
+    return config != NULL && read_register(0x92, config);
+}
+
+int16_t readConfig(void)
+{
+    uint16_t config = 0;
+    (void)readConfigChecked(&config);
+    return signed_word(config);
+}
+
+bool checkConfig(void)
+{
+    uint16_t config;
+    return !readConfigChecked(&config) || (config & 0x0400) == 0;
+}
+
+void readRes(MLX90620 *sensor)
+{
+    if (sensor == NULL)
+        return;
+    uint16_t config;
+    sensor->check = readConfigChecked(&config) ? MLX90620_OK : MLX90620_ERROR;
+    if (sensor->check == MLX90620_OK)
+        sensor->resolution = (config & 0x30) >> 4;
+}
+
+void readPTAT(MLX90620 *sensor)
+{
+    if (sensor != NULL)
+        sensor->check = read_register(0x40, &sensor->ptat) ? MLX90620_OK : MLX90620_ERROR;
+}
+
+void readCPIX(MLX90620 *sensor)
+{
+    if (sensor == NULL)
+        return;
+    uint16_t value;
+    sensor->check = read_register(0x41, &value) ? MLX90620_OK : MLX90620_ERROR;
+    if (sensor->check == MLX90620_OK)
+        sensor->cpix = signed_word(value);
+}
+
+void readIR(MLX90620 *sensor)
+{
+    if (sensor == NULL)
+        return;
+    const uint8_t command[] = { 0x02, 0x00, 0x01, 0x40 };
+    uint8_t pixels[128];
+    sensor->check = transfer(SENSOR_ADDRESS, command, sizeof(command), pixels, sizeof(pixels))
+        ? MLX90620_OK : MLX90620_ERROR;
+    if (sensor->check == MLX90620_OK) {
+        for (size_t index = 0; index < 64; ++index)
+            sensor->irData[index] = signed_word(unsigned_word(pixels + 2 * index));
+    }
+}
+
+void calculateTA(MLX90620 *sensor)
+{
+    if (sensor == NULL)
+        return;
+
+    sensor->check = MLX90620_ERROR;
+    sensor->tambient = NAN;
+    if (sensor->resolution < 0 || sensor->resolution > 3)
+        return;
+
+    const uint8_t *cal = sensor->eeprom;
+    int scale = sensor->resolution - 3;
+    double threshold = ldexp(signed_word(unsigned_word(cal + VTH_L)), scale);
+    double linear = ldexp(signed_word(unsigned_word(cal + KT1_L)), scale - (cal[KT_SCALE] >> 4));
+    double quadratic = ldexp(signed_word(unsigned_word(cal + KT2_L)),
+                             scale - (cal[KT_SCALE] & 0x0f) - 10);
+    double delta = sensor->ptat - threshold;
+    double discriminant = linear * linear + 4 * quadratic * delta;
+    if (discriminant < 0.0 || (quadratic == 0.0 && linear == 0.0))
+        return;
+
+    double temperature = quadratic == 0.0
+        ? 25.0 + delta / linear
+        : 25.0 + (sqrt(discriminant) - linear) / (2 * quadratic);
+    if (!isfinite(temperature) || fabs(temperature) > FLT_MAX)
+        return;
+
+    sensor->tambient = (float)temperature;
+    sensor->check = MLX90620_OK;
+}
+
+void calculateTO(MLX90620 *sensor)
+{
+    if (sensor == NULL)
+        return;
+
+    for (size_t index = 0; index < 64; ++index)
+        sensor->temperatures[index] = NAN;
+    sensor->check = MLX90620_ERROR;
+    if (sensor->resolution < 0 || sensor->resolution > 3 ||
+        !isfinite(sensor->tambient) || sensor->tambient < -273.15f)
+        return;
+
+    const uint8_t *cal = sensor->eeprom;
+    double emissivity = ldexp(unsigned_word(cal + CAL_EMIS_L), -15);
+    if (emissivity <= 0.0 || emissivity > 1.0)
+        return;
+
+    int scale = sensor->resolution - 3;
+    int a_scale = cal[CAL_AI_SCALE] >> 4;
+    int b_scale = scale - (cal[CAL_BI_SCALE] & 0x0f);
+    double delta = sensor->tambient - 25.0;
+    double a_common = signed_word(unsigned_word(cal + CAL_ACOMMON_L));
+    double a_cp = ldexp(signed_word(unsigned_word(cal + CAL_ACP_L)), scale);
+    double b_cp = ldexp(signed_byte(cal[CAL_BCP]), b_scale);
+    double tgc = signed_byte(cal[CAL_TGC]) / 32.0;
+    double alpha_cp = ldexp(unsigned_word(cal + CAL_alphaCP_L), scale - cal[CAL_A0_SCALE]);
+    double common_sensitivity = ldexp(unsigned_word(cal + CAL_A0_L), -cal[CAL_A0_SCALE]);
+    double ambient_radiance = pow(sensor->tambient + 273.15, 4);
+    double offset_cp = sensor->cpix - (a_cp + b_cp * delta);
+    sensor->check = MLX90620_OK;
+
+    for (size_t index = 0; index < 64; ++index) {
+        double a = ldexp(a_common + ldexp(cal[index], a_scale), scale);
+        double b = ldexp(signed_byte(cal[0x40 + index]), b_scale);
+        double sensitivity = ldexp(common_sensitivity +
+                                   ldexp(cal[0x80 + index], -cal[CAL_DELTA_A_SCALE]), scale);
+        double gain = (sensitivity - tgc * alpha_cp) * emissivity;
+        if (gain <= 0.0) {
+            sensor->check = MLX90620_ERROR;
+            continue;
+        }
+        double signal = sensor->irData[index] - (a + b * delta) - tgc * offset_cp;
+        double radiance = signal / gain + ambient_radiance;
+        if (!isfinite(radiance) || radiance < 0.0) {
+            sensor->check = MLX90620_ERROR;
+            continue;
+        }
+        sensor->temperatures[index] = (float)(sqrt(sqrt(radiance)) - 273.15);
+    }
+}

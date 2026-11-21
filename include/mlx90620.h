@@ -1,12 +1,5 @@
-#ifndef _MLX90620_H
-#define _MLX90620_H
-
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <stdlib.h>
-#include <stdbool.h>
-#include <math.h>
+#ifndef MLX90620_H
+#define MLX90620_H
 
 #include <soft_i2c.h>
 
@@ -15,14 +8,14 @@ extern "C" {
 #endif
 //Begin registers
 //refreshRate Possible values: Hz_LSB_0=0.5Hz, Hz_LSB_1=1Hz, Hz_LSB_2=2Hz, Hz_LSB_4=4Hz, Hz_LSB_8=8Hz, Hz_LSB_16=16Hz, Hz_LSB_32=32Hz.
-#define Hz_LSB_0 0b00111111;
-#define Hz_LSB_1 0b00111110;
-#define Hz_LSB_2 0b00111101;
-#define Hz_LSB_4 0b00111100;
-#define Hz_LSB_8 0b00111011;
-#define Hz_LSB_16 0b00111010;
-#define Hz_LSB_32 0b00111001;
-#define Hz_LSB_default 0b00111110;
+#define Hz_LSB_0 0x3F
+#define Hz_LSB_1 0x3E
+#define Hz_LSB_2 0x3D
+#define Hz_LSB_4 0x3C
+#define Hz_LSB_8 0x3B
+#define Hz_LSB_16 0x3A
+#define Hz_LSB_32 0x39
+#define Hz_LSB_default 0x3E
 
 #define CAL_ACOMMON_L 0xD0
 #define CAL_ACOMMON_H 0xD1
@@ -54,22 +47,25 @@ extern "C" {
 //Config register = 0xF5-F6
 #define OSC_TRIM_VALUE 0xF7
 
+enum { MLX90620_OK = 0, MLX90620_ERROR = 1 };
+
 typedef struct {
 	byte eeprom[256];
 	int16_t cpix;
-	int16_t ptat;
+	uint16_t ptat;
 	int16_t resolution;
 	int16_t configuration;
 	int16_t irData[64];
 	float temperatures[64];
 	float tambient;
-	uint8_t check;
+	uint8_t check; /* MLX90620_OK or MLX90620_ERROR after sensor operations. */
 } MLX90620;
 
 void initSensor(MLX90620*);
 void readEEPROM(MLX90620*);
 void writeTrimmingValue(MLX90620*);
-void setConfiguration();
+void setConfiguration(void);
+bool readConfigChecked(uint16_t *config);
 int16_t readConfig(void);
 bool checkConfig(void);
 void readRes(MLX90620*);
