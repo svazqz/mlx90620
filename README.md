@@ -2,6 +2,8 @@
 
 A C driver with EEPROM, configuration, pixel capture, and temperature calculations. The inherited register map and calibration match the MLX90621 documentation. Compatibility with physical MLX90620 hardware remains unverified.
 
+[![Validation](https://github.com/svazqz/mlx90620/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/svazqz/mlx90620/actions/workflows/ci.yml)
+
 [Quick start](#quick-start) · [Validation](#validation) · [Project layout](#project-layout)
 
 ## Quick start
