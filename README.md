@@ -1,9 +1,32 @@
-# mlx90620
+# ![MLX90620 Driver](docs/readme/banner.svg)
 
-Infrared sensor driver. The inherited calibration and measurement register map follows the MLX90621 datasheet. MLX90620 hardware compatibility has not been established.
+A C driver with EEPROM, configuration, pixel capture, and temperature calculations. The inherited register map and calibration match the MLX90621 documentation. Compatibility with physical MLX90620 hardware remains unverified.
 
-Check sensor.check after a measurement or calibration operation. readConfigChecked reports configuration read failures. Invalid temperature calculations produce NaN.
+[Quick start](#quick-start) · [Validation](#validation) · [Project layout](#project-layout)
 
-Run make to initialize the pinned soft_i2c submodule if needed and build build/libmlx90620.a. Run make test for host-side tests with a simulated I²C bus.
+## Quick start
 
-For Raspberry Pi applications, build soft_i2c from the submodule with WiringPi installed. Link libmlx90620.a before libsoft_i2c.a, followed by -lwiringPi and -lm. Initialize the default bus with setupI2C before calling the driver.
+Use Git, a C11 compiler, and Make. The first build initializes the pinned `soft_i2c` submodule.
+
+```sh
+make
+```
+
+The driver archive is `build/libmlx90620.a`. Build the bundled `soft_i2c` library with WiringPi installed on the Raspberry Pi. Link both archives into your app and initialize the bus with `setupI2C()`.
+
+## Validation
+
+```sh
+make test
+```
+
+The tests simulate I²C and run without connected hardware. Coverage includes register transactions, signed pixel decoding, calibration, and invalid readings. Link with `-lm` when building a consuming application.
+
+## Project layout
+
+| Path | Purpose |
+| --- | --- |
+| [`include/`](include/) | Public C interface |
+| [`src/`](src/) | Driver implementation |
+| [`tests/`](tests/) | Mock-bus unit tests |
+| [`soft_i2c/`](soft_i2c/) | Pinned GPIO-based I²C submodule |
