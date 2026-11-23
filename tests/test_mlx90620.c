@@ -62,6 +62,71 @@ static void initialization_and_eeprom(void)
     assert(bus_mock.stops == 1);
 }
 
+static void failed_initialization_leaves_calibration_intact(void)
+{
+    uint8_t bytes[258] = { 0 };
+    const size_t rejected_commands[] = { 2, 3, 4, 10, 21 };
+
+    for (size_t step = 0; step < sizeof(rejected_commands) / sizeof(rejected_commands[0]); ++step) {
+        MLX90620 sensor = { .resolution = 1 };
+        memset(sensor.eeprom, 0xa5, sizeof(sensor.eeprom));
+        mock_load(bytes, sizeof(bytes));
+        bus_mock.nack_at_write = rejected_commands[step];
+
+        initSensor(&sensor);
+
+        assert(bus_mock.write_count == rejected_commands[step]);
+        assert(sensor.check == MLX90620_ERROR && sensor.resolution == 1);
+        for (size_t index = 0; index < sizeof(sensor.eeprom); ++index)
+            assert(sensor.eeprom[index] == 0xa5);
+    }
+}
+
+static void failed_reads_preserve_previous_values(void)
+{
+    MLX90620 sensor = { .resolution = 1, .cpix = -10, .irData = { 73 } };
+
+    mock_load(NULL, 0);
+    bus_mock.nack_at_write = 1;
+    readEEPROM(&sensor);
+    assert(sensor.check == MLX90620_ERROR && sensor.eeprom[0] == 0);
+
+    mock_load(NULL, 0);
+    bus_mock.stop_status = I2C_BUS_ERROR;
+    writeTrimmingValue(&sensor);
+    assert(sensor.check == MLX90620_ERROR && bus_mock.stops == 1);
+
+    mock_load(NULL, 0);
+    bus_mock.nack_at_write = 1;
+    readRes(&sensor);
+    assert(sensor.check == MLX90620_ERROR && sensor.resolution == 1);
+
+    mock_load(NULL, 0);
+    bus_mock.nack_at_write = 1;
+    readCPIX(&sensor);
+    assert(sensor.check == MLX90620_ERROR && sensor.cpix == -10);
+
+    mock_load(NULL, 0);
+    bus_mock.nack_at_write = 1;
+    readIR(&sensor);
+    assert(sensor.check == MLX90620_ERROR && sensor.irData[0] == 73);
+}
+
+static void null_sensor_does_not_touch_bus(void)
+{
+    mock_load(NULL, 0);
+    initSensor(NULL);
+    readEEPROM(NULL);
+    writeTrimmingValue(NULL);
+    readRes(NULL);
+    readPTAT(NULL);
+    readCPIX(NULL);
+    readIR(NULL);
+    calculateTA(NULL);
+    calculateTO(NULL);
+    assert(bus_mock.starts == 0 && bus_mock.stops == 0);
+}
+
 static void registers_and_pixels(void)
 {
     MLX90620 sensor = { 0 };
@@ -161,6 +226,9 @@ static void temperatures(void)
 int main(void)
 {
     initialization_and_eeprom();
+    failed_initialization_leaves_calibration_intact();
+    failed_reads_preserve_previous_values();
+    null_sensor_does_not_touch_bus();
     registers_and_pixels();
     temperatures();
     return 0;
